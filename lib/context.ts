@@ -6,6 +6,8 @@ export class Context {
   bitFields: Parser[] = [];
   tmpVariableCount = 0;
   references: { [key: string]: { resolved: boolean; requested: boolean } } = {};
+  functionReferences: { [key: string]: Function} = {};
+  functionReferencesCounter = 0;
 
   generateVariable(name?: string) {
     const arr = [];
@@ -26,7 +28,7 @@ export class Context {
       case 'string':
         return this.generateVariable(val);
       case 'function':
-        return `(${val}).call(${this.generateVariable()}, vars)`;
+        return `(${this.generateFunctionReference(val)}).call(${this.generateVariable()}, vars)`;
     }
   }
 
@@ -36,6 +38,12 @@ export class Context {
 
   generateTmpVariable() {
     return '$tmp' + this.tmpVariableCount++;
+  }
+
+  generateFunctionReference(fn: Function) {
+    const fnName = 'fn' + this.functionReferencesCounter++;
+    this.functionReferences[fnName] = fn;
+    return fnName;
   }
 
   pushCode(code: string) {

@@ -22,6 +22,29 @@ describe("Primitive encoder", function() {
       assert.deepEqual(parsed, { a: 0, b: 1234, c: 12345678 });
       assert.deepEqual(encoded, buffer);
     });
+    it("should encode 64 bit integers", function() {
+      var parser = Parser.start()
+        .int64le('a')
+        .uint64le('b')
+        .int64be('c')
+        .uint64be('d');
+
+      var buffer = Buffer.from(
+        'feffffffffff3f00' +
+        'fdffffffffff5f00' +
+        '007ffffffffffffc' +
+        '009ffffffffffffb', 'hex');
+
+      var parsed = parser.parse(buffer);
+      var encoded = parser.encode(parsed);
+
+      assert.deepEqual(parsed, {
+        a: BigInt(Number.MAX_SAFE_INTEGER) * BigInt(2),
+        b: BigInt(Number.MAX_SAFE_INTEGER) * BigInt(3),
+        c: BigInt(Number.MAX_SAFE_INTEGER) * BigInt(4),
+        d: BigInt(Number.MAX_SAFE_INTEGER) * BigInt(5)});
+      assert.deepEqual(encoded, buffer);
+    });
     it("should use encoder to transform to integer", function() {
       var parser = Parser.start()
         .uint8("a", {
@@ -348,11 +371,11 @@ describe("Primitive encoder", function() {
       var buffer = Buffer.from("746573740000", "hex");
       var parser1 = Parser.start().string("str", {
         length: 6,
-        stripNull: false
+        stripNull: false,
       });
       var parser2 = Parser.start().string("str", {
         length: 6,
-        stripNull: true
+        stripNull: true,
       });
 
       var decoded1 = parser1.parse(buffer);
@@ -362,10 +385,9 @@ describe("Primitive encoder", function() {
 
       var decoded2 = parser2.parse(buffer);
       assert.equal(decoded2.str, "test");
-      // In this case (stripNull = true) parsing and encoding are not  the exact oposite
+
       var encoded2 = parser2.encode(decoded2);
-      assert.notDeepEqual(encoded2, buffer);
-      assert.deepEqual(encoded2, Buffer.from("test  "));
+      assert.deepEqual(encoded2, buffer);
     });
     it("should encode string with zero-bytes internally", function() {
       var buffer = Buffer.from("abc\u0000defghij\u0000");

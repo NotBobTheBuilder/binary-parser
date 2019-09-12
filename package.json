@@ -51,9 +51,9 @@
   },
   "bugs": "http://github.com/Ericbla/binary-parser/issues",
   "dependencies": {
-    "smart-buffer": "^4.0.2"
+    "smart-buffer": "^4.1.0"
   },
   "engines": {
-    "node": ">=5.10.0"
+    "node": ">=6.0.0"
   }
 }

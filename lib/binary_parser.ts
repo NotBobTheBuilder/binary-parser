@@ -11,6 +11,10 @@ interface ParserOptions {
   length?: number | string | ((item: any) => number);
   assert?: number | string | ((item: number | string) => boolean);
   lengthInBytes?: number | string | ((item: any) => number);
+  prefix?: string;
+  includePrefixInLength?: boolean;
+  prefixFormatter?: ((prefix: number) => number);
+  prefixEncoder?: ((prefix: number) => number);
   type?: string | Parser;
   formatter?: (item: any) => string | number;
   encoder?: (item: any) => any;
@@ -38,6 +42,8 @@ type ComplexTypes =
   | 'string'
   | 'buffer'
   | 'array'
+  | 'prefixed'
+  | 'prefixedArray'
   | 'choice'
   | 'nest'
   | 'seek'
@@ -155,6 +161,8 @@ const CAPITILIZED_TYPE_NAMES: { [key in Types]: string } = {
   string: 'String',
   buffer: 'Buffer',
   array: 'Array',
+  prefixed: 'Prefixed',
+  prefixedArray: 'PrefixedArray',
   choice: 'Choice',
   nest: 'Nest',
   seek: 'Seek',
@@ -485,6 +493,48 @@ export class Parser {
     return this.setNextParser('array', varName, options);
   }
 
+  prefixed(varName: string, options: ParserOptions) {
+    if (!options.prefix) {
+      throw new Error('Prefix option of prefixed is not defined.');
+    } else if (typeof options.prefix !== 'string') {
+      throw new Error('Prefix must be a primitive');
+    } else if (typeof options.prefix === 'string' && !aliasRegistry[options.prefix] &&
+      Object.keys(PRIMITIVE_SIZES).indexOf(options.prefix) < 0) {
+      throw new Error(
+        `Specified primitive type "${options.prefix}" is not supported.`
+      );
+    }
+
+    if (options.includePrefixInLength === undefined) {
+      options.includePrefixInLength = false;
+    } else if (typeof options.includePrefixInLength !== 'boolean') {
+      throw new Error('includePrefixInLength option of prefixed must be boolean or omitted.');
+    }
+
+    return this.setNextParser('prefixed', varName, options);
+  }
+
+  prefixedArray(varName: string, options: ParserOptions) {
+    if (!options.prefix) {
+      throw new Error('Prefix option of prefixed array is not defined.');
+    } else if (typeof options.prefix !== 'string') {
+      throw new Error('Prefix must be a primitive')
+    } else if (typeof options.prefix === 'string' && !aliasRegistry[options.prefix] &&
+      Object.keys(PRIMITIVE_SIZES).indexOf(options.prefix) < 0) {
+      throw new Error(
+        `Specified primitive type "${options.prefix}" is not supported.`
+      );
+    }
+
+    if (options.includePrefixInLength === undefined) {
+      options.includePrefixInLength = false;
+    } else if (typeof options.includePrefixInLength !== 'boolean') {
+      throw new Error('includePrefixInLength option of prefixed array must be boolean or omitted.');
+    }
+
+    return this.setNextParser('prefixedArray', varName, options);
+  }
+
   choice(varName: string | ParserOptions, options?: ParserOptions) {
     if (typeof options !== 'object' && typeof varName === 'object') {
       options = varName;
@@ -524,7 +574,7 @@ export class Parser {
     return this.setNextParser('choice', varName as string, options);
   }
 
-  nest(varName: string | ParserOptions, options: ParserOptions) {
+  nest(varName: string | ParserOptions, options?: ParserOptions) {
     if (typeof options !== 'object' && typeof varName === 'object') {
       options = varName;
       varName = null;
@@ -600,7 +650,7 @@ export class Parser {
     return this;
   }
 
-  getCode() {
+  getCompiledContext() {
     const ctx = new Context();
 
     ctx.pushCode('if (!Buffer.isBuffer(buffer)) {');
@@ -619,15 +669,11 @@ export class Parser {
       ctx.pushCode('return vars;');
     }
 
-    return ctx.code;
+    return ctx;
   }
 
-  getCodeEncode() {
+  getCompiledContextEncode() {
     const ctx = new Context();
-
-    ctx.pushCode('if (!obj || typeof obj !== "object") {');
-    ctx.generateError('"argument obj is not an object"');
-    ctx.pushCode('}');
 
     if (!this.alias) {
       this.addRawCodeEncode(ctx);
@@ -636,12 +682,11 @@ export class Parser {
       ctx.pushCode(`return ${FUNCTION_ENCODE_PREFIX + this.alias}(obj);`);
     }
 
-    return ctx.code;
+    return ctx;
   }
 
   private addRawCode(ctx: Context) {
     ctx.pushCode('var offset = 0;');
-
     if (this.constructorFn) {
       ctx.pushCode('var vars = new constructorFn();');
     } else {
@@ -723,13 +768,15 @@ export class Parser {
   }
 
   compile() {
-    const src = '(function(buffer, constructorFn) { ' + this.getCode() + ' })';
-    this.compiled = runInNewContext(src, { Buffer });
+    const compiledContext = this.getCompiledContext();
+    const src = '(function(buffer, constructorFn) { ' + compiledContext.code + ' })';
+    this.compiled = runInNewContext(src, Object.assign({}, compiledContext.functionReferences, { Buffer }));
   }
 
   compileEncode() {
-    const src = '(function(obj) { ' + this.getCodeEncode() + ' })';
-    this.compiledEncode = runInNewContext(src, { Buffer, SmartBuffer });
+    const compiledContext = this.getCompiledContextEncode();
+    const src = '(function(obj) { ' + compiledContext.code + ' })';
+    this.compiledEncode = runInNewContext(src, Object.assign({}, compiledContext.functionReferences, { Buffer, SmartBuffer }));
   }
 
   sizeOf(): number {
@@ -861,6 +908,12 @@ export class Parser {
         case 'array':
           this.generateArray(ctx);
           break;
+        case 'prefixed':
+          this.generatePrefixed(ctx);
+          break;
+        case 'prefixedArray':
+          this.generatePrefixedArray(ctx);
+          break;
         case 'choice':
           this.generateChoice(ctx);
           break;
@@ -931,6 +984,12 @@ export class Parser {
           break;
         case 'array':
           this.generate_encodeArray(ctx);
+          break;
+        case 'prefixed':
+          this.generate_encodePrefixed(ctx);
+          break;
+        case 'prefixedArray':
+          this.generate_encodePrefixedArray(ctx);
           break;
         case 'choice':
           this.generate_encodeChoice(ctx);
@@ -1158,7 +1217,7 @@ export class Parser {
       );
     }
     if (this.options.stripNull) {
-      ctx.pushCode(`${name} = ${name}.replace(/\\x00+$/g, '')`);
+      ctx.pushCode(`${name} = ${name}.replace(/\\x00*$/g, '')`);
     }
     if (this.options.trim) {
       ctx.pushCode(`${name} = ${name}.trim()`);
@@ -1181,6 +1240,7 @@ export class Parser {
       // Compute padding length
       const padLen = ctx.generateTmpVariable();
       ctx.pushCode(`${padLen} = ${optLength} - ${tmpBuf}.length;`);
+
       const padCharVar = ctx.generateTmpVariable();
       let padChar = ' ';
       if (this.options.padd && typeof this.options.padd === 'string') {
@@ -1198,7 +1258,9 @@ export class Parser {
       }
       // Copy the temporary string buffer to current smartBuffer
       ctx.pushCode(`smartBuffer.writeBuffer(${tmpBuf});`);
-      if (this.options.padding !== 'left') {
+      if (this.options.stripNull) {
+        ctx.pushCode(`if (${padLen} > 0) {smartBuffer.writeString('\x00'.repeat(${padLen}));}`)
+      } else if (this.options.padding !== 'left') {
         // Add trailing padding spaces
         ctx.pushCode(
           `if (${padLen} > 0) {smartBuffer.writeString(${padCharVar}.repeat(${padLen}));}`
@@ -1412,6 +1474,233 @@ export class Parser {
     ctx.pushCode(`smartBuffer = ${savSmartBuffer};`);
   }
 
+  private generatePrefixed(ctx: Context) {
+    const prefix = this.options.prefix;
+    const includePrefixInLength = this.options.includePrefixInLength;
+    const type = this.options.type;
+    const lengthInBytes = ctx.generateTmpVariable();
+    const savBuffer = ctx.generateTmpVariable();
+    const savOffset = ctx.generateTmpVariable();
+    const item = ctx.generateVariable(this.varName);
+
+    if (aliasRegistry[prefix]) {
+      const tempVar = ctx.generateTmpVariable();
+      ctx.pushCode(`var ${tempVar} = ${FUNCTION_PREFIX + prefix}(offset);`);
+      ctx.pushCode(
+        `var ${lengthInBytes} = ${tempVar}.result; offset = ${tempVar}.offset;`
+      );
+      if (prefix !== this.alias) ctx.addReference(prefix);
+    } else  {
+      const typeName = CAPITILIZED_TYPE_NAMES[prefix as PrimitiveTypes];
+      ctx.pushCode(`var ${lengthInBytes} = buffer.read${typeName}(offset);`);
+      ctx.pushCode(`offset += ${PRIMITIVE_SIZES[prefix as PrimitiveTypes]};`);
+    }
+
+    if (includePrefixInLength) {
+      ctx.pushCode(`${lengthInBytes} -= ${PRIMITIVE_SIZES[prefix as PrimitiveTypes]}`);
+    }
+
+    if (this.options.prefixFormatter) {
+      ctx.pushCode(`${lengthInBytes} = ${ctx.generateFunctionReference(this.options.prefixFormatter)}(${lengthInBytes})`);
+    }
+
+    // Take a slice of the buffer the length specified by the prefix and restrict parsing to that
+    ctx.pushCode(`var ${savBuffer} = buffer;`);
+    ctx.pushCode(`var ${savOffset} = offset;`)
+    ctx.pushCode(`buffer = buffer.slice(offset, offset + ${lengthInBytes});`);
+    ctx.pushCode(`offset = 0;`)
+
+    if (type instanceof Parser) {
+      ctx.pushCode(`${item} = {};`);
+
+      ctx.pushScope(item);
+      type.generate(ctx);
+      ctx.popScope();
+    } else if (aliasRegistry[type]) {
+      const tempVar = ctx.generateTmpVariable();
+      ctx.pushCode(`var ${tempVar} = ${FUNCTION_PREFIX + type}(offset);`);
+      ctx.pushCode(`${item} = ${tempVar}.result;`);
+      if (type !== this.alias) ctx.addReference(type);
+    } else {
+      const typeName = CAPITILIZED_TYPE_NAMES[type as PrimitiveTypes];
+      ctx.pushCode(`${item} = buffer.read${typeName}(offset);`);
+    }
+
+    // Restore the original buffer and progress by the section we skipped
+    ctx.pushCode(`offset = ${savOffset} + ${lengthInBytes};`);
+    ctx.pushCode(`buffer = ${savBuffer};`);
+  }
+
+  private generate_encodePrefixed(ctx: Context) {
+    const prefix = this.options.prefix;
+    const includePrefixInLength = this.options.includePrefixInLength;
+    const type = this.options.type;
+    const lengthInBytes = ctx.generateTmpVariable();
+    const name = ctx.generateVariable(this.varName);
+
+    // Save current encoding smartBuffer and allocate a new one
+    const savSmartBuffer = ctx.generateTmpVariable();
+    ctx.pushCode(
+      `var ${savSmartBuffer} = smartBuffer; ` +
+      `smartBuffer = SmartBuffer.fromOptions({size: ${
+        this.smartBufferSize}, encoding: "utf8"});`,
+    );
+
+    if (type instanceof Parser) {
+      ctx.pushScope(name);
+      type.generateEncode(ctx);
+      ctx.popScope();
+    } else if (!aliasRegistry[type]) {
+      ctx.pushCode(`smartBuffer.write${CAPITILIZED_TYPE_NAMES[type as Types]}(${name});`);
+    } else {
+      ctx.pushCode(
+        `smartBuffer.writeBuffer(${FUNCTION_ENCODE_PREFIX + type}(${name}));`
+      );
+      if (type !== this.alias) {
+        ctx.addReference(type);
+      }
+    }
+
+    const tmpBuffer = ctx.generateTmpVariable();
+    ctx.pushCode(`var ${tmpBuffer} = smartBuffer.toBuffer()`);
+
+    ctx.pushCode(`var ${lengthInBytes} = ${tmpBuffer}.length`);
+
+    if(this.options.prefixEncoder) {
+      ctx.pushCode(`${lengthInBytes} = ${ctx.generateFunctionReference(this.options.prefixEncoder)}(${lengthInBytes})`);
+    }
+
+    if (includePrefixInLength) {
+      ctx.pushCode(`${lengthInBytes} += ${PRIMITIVE_SIZES[prefix as PrimitiveTypes]}`);
+    }
+
+    // Copy tmp Buffer to saved smartBuffer
+    ctx.pushCode(`${savSmartBuffer}.write${CAPITILIZED_TYPE_NAMES[prefix as Types]}(${lengthInBytes})`);
+    ctx.pushCode(`${savSmartBuffer}.writeBuffer(${tmpBuffer});`);
+    // Restore current smartBuffer
+    ctx.pushCode(`smartBuffer = ${savSmartBuffer};`);
+  }
+
+  private generatePrefixedArray(ctx: Context) {
+    const prefix = this.options.prefix;
+    const includePrefixInLength = this.options.includePrefixInLength;
+    const type = this.options.type;
+    const lengthInBytes = ctx.generateTmpVariable();
+    const array = ctx.generateVariable(this.varName);
+    const counter = ctx.generateTmpVariable();
+    const item = ctx.generateTmpVariable();
+
+    if (aliasRegistry[prefix]) {
+      const tempVar = ctx.generateTmpVariable();
+      ctx.pushCode(`var ${tempVar} = ${FUNCTION_PREFIX + prefix}(offset);`);
+      ctx.pushCode(
+        `var ${lengthInBytes} = ${tempVar}.result; offset = ${tempVar}.offset;`
+      );
+      if (prefix !== this.alias) ctx.addReference(prefix);
+    } else  {
+      const typeName = CAPITILIZED_TYPE_NAMES[prefix as PrimitiveTypes];
+      ctx.pushCode(`var ${lengthInBytes} = buffer.read${typeName}(offset);`);
+      ctx.pushCode(`offset += ${PRIMITIVE_SIZES[prefix as PrimitiveTypes]};`);
+    }
+
+    if (includePrefixInLength) {
+      ctx.pushCode(`${lengthInBytes} -= ${PRIMITIVE_SIZES[prefix as PrimitiveTypes]}`);
+    }
+
+    if (this.options.prefixFormatter) {
+      ctx.pushCode(`${lengthInBytes} = ${ctx.generateFunctionReference(this.options.prefixFormatter)}(${lengthInBytes})`);
+    }
+
+    ctx.pushCode(`${array} = [];`);
+
+    ctx.pushCode(
+      `for (var ${counter} = offset; offset - ${counter} < ${lengthInBytes}; ) {`
+    );
+
+    if (type instanceof Parser) {
+      ctx.pushCode(`var ${item} = {};`);
+
+      ctx.pushScope(item);
+      type.generate(ctx);
+      ctx.popScope();
+    } else if (aliasRegistry[type]) {
+      const tempVar = ctx.generateTmpVariable();
+      ctx.pushCode(`var ${tempVar} = ${FUNCTION_PREFIX + type}(offset);`);
+      ctx.pushCode(
+        `var ${item} = ${tempVar}.result; offset = ${tempVar}.offset;`
+      );
+      if (type !== this.alias) ctx.addReference(type);
+    } else {
+      const typeName = CAPITILIZED_TYPE_NAMES[type as PrimitiveTypes];
+      ctx.pushCode(`var ${item} = buffer.read${typeName}(offset);`);
+      ctx.pushCode(`offset += ${PRIMITIVE_SIZES[type as PrimitiveTypes]};`);
+    }
+
+    ctx.pushCode(`${array}.push(${item});`);
+
+    ctx.pushCode('}');
+  }
+
+  private generate_encodePrefixedArray(ctx: Context) {
+    const prefix = this.options.prefix;
+    const includePrefixInLength = this.options.includePrefixInLength;
+    const type = this.options.type;
+    const lengthInBytes = ctx.generateTmpVariable();
+    const name = ctx.generateVariable(this.varName);
+    const item = ctx.generateTmpVariable();
+    const itemCounter = ctx.generateTmpVariable();
+
+    // Save current encoding smartBuffer and allocate a new one
+    const savSmartBuffer = ctx.generateTmpVariable();
+    ctx.pushCode(
+      `var ${savSmartBuffer} = smartBuffer; ` +
+      `smartBuffer = SmartBuffer.fromOptions({size: ${
+        this.smartBufferSize}, encoding: "utf8"});`,
+    );
+
+    ctx.pushCode(`for (var ${itemCounter} = 0 ; `
+                 + `${itemCounter} < ${name}.length; `
+                 + `${itemCounter}++ ) {`);
+
+    ctx.pushCode(`var ${item} = ${name}[${itemCounter}];`);
+
+    if (type instanceof Parser) {
+      ctx.pushScope(item);
+      type.generateEncode(ctx);
+      ctx.popScope();
+    } else if (!aliasRegistry[type]) {
+      ctx.pushCode(`smartBuffer.write${CAPITILIZED_TYPE_NAMES[type as Types]}(${item});`);
+    } else {
+      ctx.pushCode(
+        `smartBuffer.writeBuffer(${FUNCTION_ENCODE_PREFIX + type}(${item}));`
+      );
+      if (type !== this.alias) {
+        ctx.addReference(type);
+      }
+    }
+
+    ctx.pushCode('}'); // End of 'for (...) {'
+
+    const tmpBuffer = ctx.generateTmpVariable();
+    ctx.pushCode(`var ${tmpBuffer} = smartBuffer.toBuffer()`);
+
+    ctx.pushCode(`var ${lengthInBytes} = ${tmpBuffer}.length`);
+
+    if (this.options.prefixEncoder) {
+      ctx.pushCode(`${lengthInBytes} = ${ctx.generateFunctionReference(this.options.prefixEncoder)}(${lengthInBytes})`);
+    }
+
+    if (includePrefixInLength) {
+      ctx.pushCode(`${lengthInBytes} += ${PRIMITIVE_SIZES[prefix as PrimitiveTypes]}`);
+    }
+
+    // Copy tmp Buffer to saved smartBuffer
+    ctx.pushCode(`${savSmartBuffer}.write${CAPITILIZED_TYPE_NAMES[prefix as Types]}(${lengthInBytes})`);
+    ctx.pushCode(`${savSmartBuffer}.writeBuffer(${tmpBuffer});`);
+    // Restore current smartBuffer
+    ctx.pushCode(`smartBuffer = ${savSmartBuffer};`);
+  }
+
   private generateChoiceCase(
     ctx: Context,
     varName: string,
@@ -1482,7 +1771,7 @@ export class Parser {
     if (this.options.defaultChoice) {
       this.generateChoiceCase(ctx, this.varName, this.options.defaultChoice);
     } else {
-      ctx.generateError(`"Met undefined tag value " + ${tag} + " at choice"`);
+      ctx.generateError(`"Met undefined tag value " + ${tag} + " at choice ${this.varName}"`);
     }
     ctx.pushCode('}');
   }
@@ -1505,7 +1794,7 @@ export class Parser {
         this.options.defaultChoice
       );
     } else {
-      ctx.generateError(`"Met undefined tag value " + ${tag} + " at choice"`);
+      ctx.generateError(`"Met undefined tag value " + ${tag} + " at choice ${this.varName}"`);
     }
     ctx.pushCode('}');
   }
@@ -1557,7 +1846,7 @@ export class Parser {
     formatter: Function
   ) {
     if (typeof formatter === 'function') {
-      ctx.pushCode(`${varName} = (${formatter}).call(this, ${varName}, buffer, offset);`);
+      ctx.pushCode(`${varName} = (${ctx.generateFunctionReference(formatter)}).call(this, ${varName}, buffer, offset);`);
     }
   }
 
@@ -1567,7 +1856,7 @@ export class Parser {
     encoder?: Function
   ) {
     if (typeof encoder === 'function') {
-      ctx.pushCode(`${varName} = (${encoder}).call(this, ${varName}, vars);`);
+      ctx.pushCode(`${varName} = (${ctx.generateFunctionReference(encoder)}).call(this, ${varName}, vars);`);
     }
   }
 
